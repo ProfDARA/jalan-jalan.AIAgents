@@ -2,9 +2,13 @@
 
 Uses a generative model (Gemini) when available to suggest recommended spots
 based on weather. Falls back to a heuristic generator if no model/key is configured.
+
+This version includes basic session & memory integration (InMemorySessionService)
+and logging for observability.
 """
 import os
 from typing import List
+import logging
 
 try:
     # optional: google generative ai client
@@ -12,6 +16,10 @@ try:
     GENAI_AVAILABLE = True
 except Exception:
     GENAI_AVAILABLE = False
+
+from agents.session import InMemorySessionService
+
+logger = logging.getLogger(__name__)
 
 
 class LocationAgent:
@@ -85,14 +93,27 @@ class LocationAgent:
 
     @staticmethod
     def run(weather_data: dict, destination: str) -> List[dict]:
-        # Try real model first if configured
+        # Try real model first if configured, record results in session memory
+        session_id = InMemorySessionService.create_session({"destination": destination, "date": weather_data.get("date")})
         prompt = LocationAgent.prompt_for_spots(destination, weather_data)
+        spots: List[dict] = []
         try:
             spots = LocationAgent.call_gemini(prompt)
             if spots:
-                return spots
-        except Exception:
-            pass
+                logger.info("LocationAgent: obtained %d spots from Gemini", len(spots))
+        except Exception as e:
+            logger.debug("Gemini call failed or unavailable: %s", e)
 
-        # Fallback heuristics
-        return LocationAgent.heuristic(destination, weather_data)
+        if not spots:
+            spots = LocationAgent.heuristic(destination, weather_data)
+            logger.info("LocationAgent: using heuristic, returned %d spots", len(spots))
+
+        # store state & memory
+        InMemorySessionService.set_state_value(session_id, "last_recommendations", spots)
+        InMemorySessionService.append_memory(session_id, {"when": weather_data.get("date"), "places": spots})
+
+        # Attach session id for traceability
+        for s in spots:
+            s.setdefault("session_id", session_id)
+
+        return spots
